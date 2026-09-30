@@ -1,13 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import { parseInput, type InputError } from './lib/parseInput';
-import type { ModeResult } from './lib/mode';
 import { VirtualTable } from './VirtualTable';
-
-interface RunSummary {
-  n: number;
-  q: number;
-  elapsedMs: number;
-}
+import type { BimodalResult, ModeResult, RunSnapshot, WorkerResponse } from './protocol';
 
 const EXAMPLE = `{
   "values": [-1, 2, -1, 2, 0, 0, -1],
@@ -21,18 +15,25 @@ const EXAMPLE = `{
 export default function App() {
   const [text, setText] = useState('');
   const [error, setError] = useState<InputError | null>(null);
-  const [answers, setAnswers] = useState<ModeResult[] | null>(null);
-  const [queries, setQueries] = useState<{ left: number; right: number }[]>([]);
+  // 查询与答案只通过"同一次 Worker 计算"产生的快照呈现；换批时整块置 null，
+  // 新答案到达时整块替换，绝不让新文件/新一轮短暂展示上一批的第二名。
+  const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null);
   const [running, setRunning] = useState(false);
-  const [summary, setSummary] = useState<RunSummary | null>(null);
+  const [bimodal, setBimodal] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const workerRef = useRef<Worker | null>(null);
+  const runIdRef = useRef(0);
 
   const lastRow = useMemo(() => {
-    if (!answers || answers.length === 0) return null;
-    const i = answers.length - 1;
-    return { index: i + 1, query: queries[i], answer: answers[i] };
-  }, [answers, queries]);
+    if (!snapshot || snapshot.answers.length === 0) return null;
+    const i = snapshot.answers.length - 1;
+    const query = snapshot.queries[i];
+    if (snapshot.bimodal) {
+      const a = snapshot.answers[i];
+      return { index: i + 1, query, first: a.first, second: a.second };
+    }
+    return { index: i + 1, query, first: snapshot.answers[i], second: null };
+  }, [snapshot]);
 
   function locateError(err: InputError) {
     setError(err);
@@ -48,10 +49,10 @@ export default function App() {
   }
 
   async function handleRun() {
-    // 每次重新计算先清空旧结果，失败时也绝不会残留或输出部分答案。
-    setAnswers(null);
-    setQueries([]);
-    setSummary(null);
+    // 每次重新计算先清空旧快照，失败时也绝不会残留或输出部分答案。
+    runIdRef.current += 1;
+    const runId = runIdRef.current;
+    setSnapshot(null);
     setError(null);
 
     const parsed = parseInput(text);
@@ -62,6 +63,8 @@ export default function App() {
 
     setRunning(true);
 
+    // 选项与查询同属本轮快照；计算期间再勾选复选框不会污染已提交的结果。
+    const wantBimodal = bimodal;
     // values 的 ArrayBuffer 会随 postMessage 转移给 Worker，主线程侧的
     // Int32Array 随即被 neuter（length 变为 0）；规模必须在转移之前记下，
     // 否则状态栏会把读数数量错误显示为 0。
@@ -74,15 +77,30 @@ export default function App() {
       new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
     workerRef.current = worker;
 
-    worker.onmessage = (ev: MessageEvent<{ answers: ModeResult[]; elapsedMs: number }>) => {
-      // 按查询原顺序返回（Worker 内部已还原顺序）。
-      setAnswers(ev.data.answers);
-      setQueries(parsedQueries);
-      setSummary({
-        n: valueCount,
-        q: queryCount,
-        elapsedMs: ev.data.elapsedMs,
-      });
+    worker.onmessage = (ev: MessageEvent<WorkerResponse>) => {
+      // 过期批次（用户已发起新一轮计算/新文件）的迟到响应直接丢弃。
+      if (ev.data.runId !== runId) return;
+      // 协议、结果类型、虚拟列表与导出共用这一个快照对象。
+      const { elapsedMs, answers, bimodal: answeredBimodal } = ev.data;
+      setSnapshot(
+        answeredBimodal
+          ? {
+              bimodal: true,
+              queries: parsedQueries,
+              answers: answers as BimodalResult[],
+              n: valueCount,
+              q: queryCount,
+              elapsedMs,
+            }
+          : {
+              bimodal: false,
+              queries: parsedQueries,
+              answers: answers as ModeResult[],
+              n: valueCount,
+              q: queryCount,
+              elapsedMs,
+            },
+      );
       setRunning(false);
     };
     worker.onerror = (e) => {
@@ -93,7 +111,10 @@ export default function App() {
       setRunning(false);
       locateError({ message: '计算失败：Worker 消息反序列化错误', offset: -1, path: '$' });
     };
-    worker.postMessage({ values: parsed.values, queries: parsed.queries }, [parsed.values.buffer]);
+    worker.postMessage(
+      { values: parsed.values, queries: parsed.queries, bimodal: wantBimodal, runId },
+      [parsed.values.buffer],
+    );
   }
 
   function handlePasteExample() {
@@ -104,6 +125,49 @@ export default function App() {
   function scrollToLast() {
     const el = document.querySelector('.table-scroll');
     if (el) el.scrollTop = el.scrollHeight;
+  }
+
+  function handleExport() {
+    if (!snapshot) return;
+    // 导出来自当前快照：重算或切换双峰选项后旧导出链接不会混入上一批答案。
+    const makeResults = () => {
+      if (snapshot.bimodal) {
+        return snapshot.queries.map((query, i) => {
+          const a = snapshot.answers[i];
+          return {
+            index: i + 1,
+            left: query.left,
+            right: query.right,
+            first: a.first,
+            second: a.second,
+          };
+        });
+      }
+      return snapshot.queries.map((query, i) => ({
+        index: i + 1,
+        left: query.left,
+        right: query.right,
+        mode: snapshot.answers[i],
+      }));
+    };
+    const payload = {
+      bimodal: snapshot.bimodal,
+      n: snapshot.n,
+      q: snapshot.q,
+      elapsedMs: snapshot.elapsedMs,
+      results: makeResults(),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `axle-mode-results${snapshot.bimodal ? '-bimodal' : ''}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -124,6 +188,16 @@ export default function App() {
           <button type="button" className="btn" onClick={handlePasteExample} disabled={running} data-testid="example-button">
             填入示例
           </button>
+          <label className="option-toggle" data-testid="bimodal-toggle">
+            <input
+              type="checkbox"
+              checked={bimodal}
+              onChange={(e) => setBimodal(e.target.checked)}
+              disabled={running}
+              data-testid="bimodal-checkbox"
+            />
+            双峰复核（返回前两个不同读数及频次，频次降序、读数升序）
+          </label>
           {error && (
             <span className="error-summary" data-testid="error-summary">
               ✗ {error.path}（偏移 {error.offset}）
@@ -152,27 +226,46 @@ export default function App() {
         )}
       </section>
 
-      {summary && (
+      {snapshot && (
         <section className="panel status-panel" data-testid="status-panel">
           <span>
-            读数 <strong>{summary.n}</strong> 条 · 查询 <strong>{summary.q}</strong> 个 ·
-            算法耗时 <strong>{summary.elapsedMs.toFixed(1)}</strong> ms
+            读数 <strong>{snapshot.n}</strong> 条 · 查询 <strong>{snapshot.q}</strong> 个 ·
+            算法耗时 <strong>{snapshot.elapsedMs.toFixed(1)}</strong> ms
+            {snapshot.bimodal && <span className="snapshot-tag" data-testid="bimodal-badge">· 双峰复核</span>}
           </span>
-          {lastRow && (
-            <span className="last-row" data-testid="last-row">
-              末行（第 {lastRow.index} 个）：[{lastRow.query.left}, {lastRow.query.right}] →
-              众数 <strong>{lastRow.answer.value}</strong>，频次 <strong>{lastRow.answer.count}</strong>
-              <button type="button" className="btn small" onClick={scrollToLast}>
-                滚动到末行
-              </button>
-            </span>
-          )}
+          <span className="status-actions">
+            <button type="button" className="btn small" onClick={handleExport} data-testid="export-button">
+              导出结果 JSON
+            </button>
+            {lastRow && (
+              <span className="last-row" data-testid="last-row">
+                末行（第 {lastRow.index} 个）：[{lastRow.query.left}, {lastRow.query.right}] →
+                众数 <strong>{lastRow.first.value}</strong>，频次 <strong>{lastRow.first.count}</strong>
+                {snapshot.bimodal && (
+                  <>
+                    {' '}· 第二读数{' '}
+                    {lastRow.second ? (
+                      <>
+                        <strong data-testid="last-row-second-value">{lastRow.second.value}</strong>，
+                        频次 <strong data-testid="last-row-second-count">{lastRow.second.count}</strong>
+                      </>
+                    ) : (
+                      <strong data-testid="last-row-second-empty">空</strong>
+                    )}
+                  </>
+                )}
+                <button type="button" className="btn small" onClick={scrollToLast}>
+                  滚动到末行
+                </button>
+              </span>
+            )}
+          </span>
         </section>
       )}
 
-      {answers && (
+      {snapshot && (
         <section className="panel table-panel" data-testid="result-panel">
-          <VirtualTable answers={answers} queries={queries} />
+          <VirtualTable snapshot={snapshot} />
         </section>
       )}
     </div>

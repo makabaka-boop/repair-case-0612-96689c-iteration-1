@@ -211,6 +211,50 @@ tr.row-odd {
   font-variant-numeric: tabular-nums;
 }
 
+.col-second-mode {
+  font-variant-numeric: tabular-nums;
+}
+
+.col-second-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.empty-mark {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.option-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.option-toggle input {
+  cursor: pointer;
+}
+
+.snapshot-tag {
+  color: var(--accent);
+  margin-left: 6px;
+}
+
+.status-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--text);
+}
+
+.status-actions .btn.small {
+  margin-left: 0;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
