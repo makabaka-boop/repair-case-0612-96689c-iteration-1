@@ -1,16 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ModeResult } from './lib/mode';
+import type { BimodalResult, ModeResult } from './lib/mode';
 
 interface VirtualTableProps {
-  answers: ModeResult[];
+  answers: ModeResult[] | BimodalResult[];
   queries: { left: number; right: number }[];
+  /** 双峰复核：启用时追加"次席读数/频次"两列，第一名沿用众数列。 */
+  bimodal: boolean;
 }
 
 const ROW_HEIGHT = 30;
 const OVERSCAN = 12;
 
 /** 可滚动结果表：仅渲染可视区行，20 万行也能流畅浏览，且保持原顺序。 */
-export function VirtualTable({ answers, queries }: VirtualTableProps) {
+export function VirtualTable({ answers, queries, bimodal }: VirtualTableProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(480);
@@ -48,6 +50,9 @@ export function VirtualTable({ answers, queries }: VirtualTableProps) {
   for (let i = startIndex; i < endIndex; i++) {
     const a = answers[i];
     const q = queries[i];
+    // 两种结果形态共用同一行：双峰时第一名就是旧众数，第二名可能为空。
+    const first: ModeResult = bimodal ? (a as BimodalResult).first : (a as ModeResult);
+    const second = bimodal ? (a as BimodalResult).second : null;
     rows.push(
       <tr
         key={i}
@@ -61,11 +66,31 @@ export function VirtualTable({ answers, queries }: VirtualTableProps) {
           [{q.left}, {q.right}]
         </td>
         <td className="col-mode" data-label="众数">
-          {a.value}
+          {first.value}
         </td>
         <td className="col-count" data-label="频次">
-          {a.count}
+          {first.count}
         </td>
+        {bimodal && (
+          <>
+            <td
+              className="col-mode col-second"
+              data-label="次席读数"
+              data-testid={`second-value-${i}`}
+              data-empty={second === null ? 'true' : 'false'}
+            >
+              {second === null ? '—' : second.value}
+            </td>
+            <td
+              className="col-count col-second"
+              data-label="次席频次"
+              data-testid={`second-count-${i}`}
+              data-empty={second === null ? 'true' : 'false'}
+            >
+              {second === null ? '—' : second.count}
+            </td>
+          </>
+        )}
       </tr>,
     );
   }
@@ -79,18 +104,24 @@ export function VirtualTable({ answers, queries }: VirtualTableProps) {
             <th className="col-range">边界 [left, right]</th>
             <th className="col-mode">众数</th>
             <th className="col-count">频次</th>
+            {bimodal && (
+              <>
+                <th className="col-mode col-second">次席读数</th>
+                <th className="col-count col-second">次席频次</th>
+              </>
+            )}
           </tr>
         </thead>
         <tbody>
           {topPad > 0 && (
             <tr aria-hidden="true" style={{ height: topPad }}>
-              <td colSpan={4} style={{ padding: 0, border: 'none' }} />
+              <td colSpan={bimodal ? 6 : 4} style={{ padding: 0, border: 'none' }} />
             </tr>
           )}
           {rows}
           {bottomPad > 0 && (
             <tr aria-hidden="true" style={{ height: bottomPad }}>
-              <td colSpan={4} style={{ padding: 0, border: 'none' }} />
+              <td colSpan={bimodal ? 6 : 4} style={{ padding: 0, border: 'none' }} />
             </tr>
           )}
         </tbody>

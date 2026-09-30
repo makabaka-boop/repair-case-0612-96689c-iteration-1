@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { rangeModes, type ModeResult } from './mode';
+import { rangeModes, type BimodalResult, type ModeResult } from './mode';
 
 /** 暴力实现：逐区间用 Map 计数，频次并列取较小值。 */
 function bruteModes(values: number[], queries: { left: number; right: number }[]): ModeResult[] {
@@ -214,5 +214,180 @@ describe('rangeModes - 20 万读数与 20 万查询对抗批次', () => {
 
     // O((n+q)√n) 量级：20 万规模应在数秒内完成（宽松上限，避免抖动）
     expect(elapsed).toBeLessThan(30_000);
+  });
+});
+
+/** 双峰预言机：逐区间 Map 计数，按频次降序、读数升序取前两名不同读数。 */
+function bruteBimodal(
+  values: number[],
+  queries: { left: number; right: number }[],
+): BimodalResult[] {
+  return queries.map(({ left, right }) => {
+    const counts = new Map<number, number>();
+    for (let i = left; i <= right; i++) counts.set(values[i], (counts.get(values[i]) ?? 0) + 1);
+    const ranked = [...counts.entries()]
+      .map(([value, count]) => ({ value, count }))
+      .sort((a, b) => b.count - a.count || a.value - b.value);
+    return {
+      first: { value: ranked[0].value, count: ranked[0].count },
+      second: ranked.length >= 2
+        ? { value: ranked[1].value, count: ranked[1].count }
+        : null,
+    };
+  });
+}
+
+/** 枚举数组全部闭区间（小 n），用于逐区间对照。 */
+function allIntervals(n: number): { left: number; right: number }[] {
+  const out: { left: number; right: number }[] = [];
+  for (let left = 0; left < n; left++) {
+    for (let right = left; right < n; right++) out.push({ left, right });
+  }
+  return out;
+}
+
+describe('rangeModes 双峰复核 - 预言机逐区间核对', () => {
+  it('全相等：每个区间次席均明确为 null，第一名频次为区间长度', () => {
+    const values = Int32Array.of(7, 7, 7, 7);
+    const got = rangeModes(values, allIntervals(4), { bimodal: true });
+    const expected = bruteBimodal([7, 7, 7, 7], allIntervals(4));
+    expect(got).toEqual(expected);
+    for (const r of got) {
+      expect(r.second).toBeNull();
+      expect(r.first.value).toBe(7);
+    }
+    // 端点单点区间
+    expect(got[0]).toEqual({ first: { value: 7, count: 1 }, second: null });
+  });
+
+  it('单元素数组（端点退化情形）', () => {
+    expect(rangeModes(Int32Array.of(-5), [{ left: 0, right: 0 }], { bimodal: true })).toEqual([
+      { first: { value: -5, count: 1 }, second: null },
+    ]);
+  });
+
+  it('并列：频次相同按读数升序取前两名，与处理顺序无关', () => {
+    // 2 与 -3 各 2 次、5 一次：排序键 (-3,2)、(2,2)、(5,1)
+    const arr = [2, -3, 2, -3, 5];
+    const values = Int32Array.of(...arr);
+    const queries = [{ left: 0, right: 4 }, { left: 0, right: 1 }, { left: 2, right: 4 }];
+    expect(rangeModes(values, queries, { bimodal: true })).toEqual(
+      bruteBimodal(arr, queries),
+    );
+    expect(rangeModes(values, [queries[0]], { bimodal: true })[0]).toEqual({
+      first: { value: -3, count: 2 },
+      second: { value: 2, count: 2 },
+    });
+    // 下标 1..4 为 [-3,2,-3,5]：-3 两次居首，2、5 各一次并列，读数升序取 2
+    expect(rangeModes(values, [{ left: 1, right: 4 }], { bimodal: true })[0]).toEqual({
+      first: { value: -3, count: 2 },
+      second: { value: 2, count: 1 },
+    });
+    // 仅下标 1、2 为 [-3,2]：各一次，读数升序 -3、2
+    expect(rangeModes(values, [{ left: 1, right: 2 }], { bimodal: true })[0]).toEqual({
+      first: { value: -3, count: 1 },
+      second: { value: 2, count: 1 },
+    });
+  });
+
+  it('负数：INT32 最小值得参与排序裁决', () => {
+    const arr = [-2147483648, 2147483647, -2147483648, 2147483647, 0];
+    const values = Int32Array.of(...arr);
+    const queries = allIntervals(5);
+    expect(rangeModes(values, queries, { bimodal: true })).toEqual(
+      bruteBimodal(arr, queries),
+    );
+    const whole = rangeModes(values, [{ left: 0, right: 4 }], { bimodal: true })[0];
+    expect(whole).toEqual({
+      first: { value: -2147483648, count: 2 },
+      second: { value: 2147483647, count: 2 },
+    });
+  });
+
+  it('端点：每个闭区间（含长度 1 与全长）逐区间与预言机一致', () => {
+    const cases = [
+      [1, -1, 1, -1, 0],
+      [-5, -5, -3, -3, -3, 2],
+      [0, 0, 0, 1],
+      [9, 8, 7, 6, 5, 4],
+    ];
+    for (const arr of cases) {
+      const values = Int32Array.of(...arr);
+      const queries = allIntervals(arr.length);
+      expect(rangeModes(values, queries, { bimodal: true })).toEqual(
+        bruteBimodal(arr, queries),
+      );
+    }
+  });
+
+  it('随机小数组：全部区间逐区间对照（覆盖跨块次席与块内次席）', () => {
+    const seeds = [
+      { seed: 11, n: 1, alphabet: 1 },
+      { seed: 12, n: 8, alphabet: 2 },
+      { seed: 13, n: 12, alphabet: 3 },
+      { seed: 14, n: 10, alphabet: 6 },
+      { seed: 15, n: 13, alphabet: 20 },
+    ];
+    for (const tc of seeds) {
+      const rand = rng(tc.seed);
+      const arr = Array.from(randomArray(tc.n, tc.alphabet, rand));
+      const values = Int32Array.of(...arr);
+      const queries = allIntervals(tc.n);
+      expect(rangeModes(values, queries, { bimodal: true })).toEqual(
+        bruteBimodal(arr, queries),
+      );
+    }
+  });
+
+  it('随机查询集合暴力对照（多种字母表密度）', () => {
+    const cases = [
+      { seed: 21, n: 60, q: 300, alphabet: 2 },
+      { seed: 22, n: 200, q: 500, alphabet: 7 },
+      { seed: 23, n: 500, q: 800, alphabet: 500 },
+    ];
+    for (const tc of cases) {
+      const rand = rng(tc.seed);
+      const values = randomArray(tc.n, tc.alphabet, rand);
+      const queries = randomQueries(tc.q, tc.n, rand);
+      expect(rangeModes(values, queries, { bimodal: true })).toEqual(
+        bruteBimodal(Array.from(values), queries),
+      );
+    }
+  });
+
+  it('第一名与未启用复核时的旧众数逐项一致（同参数再算一遍比对）', () => {
+    const rand = rng(77);
+    const values = randomArray(400, 13, rand);
+    const queries = randomQueries(600, 400, rand);
+    const old: ModeResult[] = rangeModes(values, queries);
+    const bimodal = rangeModes(values, queries, { bimodal: true });
+    expect(bimodal.length).toBe(old.length);
+    for (let i = 0; i < queries.length; i++) {
+      expect(bimodal[i].first).toEqual(old[i]);
+    }
+  });
+
+  it('第二名不随查询处理顺序改变：正序、逆序、乱序结果相同', () => {
+    const rand = rng(88);
+    const values = randomArray(300, 9, rand);
+    const queries = randomQueries(400, 300, rand);
+    const base = rangeModes(values, queries, { bimodal: true });
+
+    const reversed = rangeModes(values, [...queries].reverse(), { bimodal: true });
+    for (let i = 0; i < queries.length; i++) {
+      expect(reversed[queries.length - 1 - i]).toEqual(base[i]);
+    }
+
+    // Fisher–Yates 打乱处理顺序：同一区间（允许重复）的答案必须保持一致
+    const shuffled = [...queries];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    const shuffledAnswers = rangeModes(values, shuffled, { bimodal: true });
+    shuffled.forEach((qr, pos) => {
+      const idx = queries.findIndex((x) => x.left === qr.left && x.right === qr.right);
+      expect(shuffledAnswers[pos]).toEqual(base[idx]);
+    });
   });
 });

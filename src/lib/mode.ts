@@ -4,12 +4,19 @@
  * 给定有符号 32 位整数序列 values 与若干查询 [left, right]，按查询原顺序返回
  * 每个闭区间内出现频次最高的数值；频次并列时取较小数值。
  *
+ * 可选"双峰复核"（options.bimodal）：在众数之外再返回出现次数第二高的**不同**
+ * 读数及其频次，排序键固定为「频次降序、读数升序」，与莫队处理顺序无关；窗口内
+ * 只有一种读数时 second 明确为 null。双峰结果与众数共用同一次指针移动维护出的
+ * 频次表（不逐区间重建）：回答时在获胜值块上做一次升序扫描得到块内前两名，再用
+ * O(√m) 扫一遍各块的最大频次找出其余值块中的最优候选并裁决，回答仍为 O(√m)。
+ *
  * 算法：Mo's algorithm（按 Hilbert 曲线顺序处理查询）保证总指针移动 O(n√q)，
  * 值域做 √m 分块；块内按"频次层"计数（level counts）。加入/删除一个排名
  * 为 O(1) 摊还；回答查询时只需：
  *   1. 取全局最大频次 maxFreq（O(1) 摊还）；
  *   2. 从 rank 最小的块开始找到块最大频次等于 maxFreq 的块（O(√m)）；
- *   3. 在该块内按 rank 升序找到首个频次等于 maxFreq 的排名（O(√m)）。
+ *   3. 在该块内按 rank 升序找到首个频次等于 maxFreq 的排名（O(√m)）；
+ *   4. 双峰复核时再扫描获胜块取块内次席、扫描块头取其他块首席并裁决（O(√m)）。
  * 总时间复杂度 O((n + q)√n)，空间复杂度 O(n + q)。
  */
 
@@ -17,6 +24,20 @@
 export interface ModeResult {
   value: number;
   count: number;
+}
+
+/**
+ * 双峰复核结果：first 与未启用复核时的众数逐项一致（同一次计算产生）；
+ * second 为频次第二高的不同读数，窗口内只有一种读数时为 null。
+ */
+export interface BimodalResult {
+  first: ModeResult;
+  second: ModeResult | null;
+}
+
+/** 区间查询选项：bimodal 为 true 时返回前两名不同读数（双峰复核）。 */
+export interface RangeModeOptions {
+  bimodal?: boolean;
 }
 
 /** Hilbert 曲线序号（power >= 1，序号范围 [0, 2^(2power))）。 */
@@ -47,12 +68,29 @@ function hilbertOrder(x: number, y: number, power: number): number {
  *
  * @param values 长度 n（1..200000）的有符号 32 位整数序列
  * @param queries 长度 q（1..200000）的闭区间查询，0 <= left <= right < n
+ * @param options.bimodal 启用双峰复核时返回 BimodalResult[]（含第二名）
  * @returns 按 queries 原顺序排列的结果
  */
 export function rangeModes(
   values: Int32Array,
   queries: ReadonlyArray<{ left: number; right: number }>,
-): ModeResult[] {
+): ModeResult[];
+export function rangeModes(
+  values: Int32Array,
+  queries: ReadonlyArray<{ left: number; right: number }>,
+  options: { bimodal: true },
+): BimodalResult[];
+export function rangeModes(
+  values: Int32Array,
+  queries: ReadonlyArray<{ left: number; right: number }>,
+  options: RangeModeOptions,
+): ModeResult[] | BimodalResult[];
+export function rangeModes(
+  values: Int32Array,
+  queries: ReadonlyArray<{ left: number; right: number }>,
+  options: RangeModeOptions = {},
+): ModeResult[] | BimodalResult[] {
+  const bimodal = options.bimodal === true;
   const n = values.length;
   const q = queries.length;
   if (n === 0 || q === 0) return [];
@@ -133,7 +171,7 @@ export function rangeModes(
   for (let i = 0; i < q; i++) perm[i] = i;
   perm.sort((a, b) => order[a] - order[b]);
 
-  const answers = new Array<ModeResult>(q);
+  const answers: (ModeResult | BimodalResult)[] = new Array(q);
   let curL = 0;
   let curR = -1;
   for (let k = 0; k < q; k++) {
@@ -149,15 +187,79 @@ export function rangeModes(
     let chosenBlock = 0;
     while (blockMax[chosenBlock] !== maxFreq) chosenBlock++;
 
-    // 块内升序找首个频次为 maxFreq 的排名（块最大频次保证其一定存在）
+    // 块内按 rank 升序扫描一次，同时取得排序键（频次降序、rank 升序）下的
+    // 前两名：扫描方向保证频次并列时先出现的 rank 更小。第一名即为旧众数，
+    // 次席是"本块内、第一名之外"的最优候选。只统计频次 > 0 的在场读数。
     const start = chosenBlock * blockSize;
     const end = Math.min(start + blockSize, m);
-    let chosenRank = start;
-    while (chosenRank < end && freq[chosenRank] !== maxFreq) chosenRank++;
+    let topRank = -1;
+    let topFreq = -1;
+    let secondRank = -1;
+    let secondFreq = -1;
+    if (bimodal) {
+      for (let r = start; r < end; r++) {
+        const f = freq[r];
+        if (f <= 0) continue;
+        if (topRank < 0) {
+          topRank = r;
+          topFreq = f;
+        } else if (f > topFreq) {
+          // 频次严格更高：旧首席降为次席，新值成为首席（升序扫描下
+          // f === topFreq 时不可能更优，故这里严格大于即足够）
+          secondRank = topRank;
+          secondFreq = topFreq;
+          topRank = r;
+          topFreq = f;
+        } else if (secondRank < 0 || f > secondFreq) {
+          // 次席位空缺，或频次严格高于现次席；与现次席同频时当前 rank 更大，
+          // 不替换，保证并列裁决只依赖读数本身而非查询处理顺序
+          secondRank = r;
+          secondFreq = f;
+        }
+      }
+    } else {
+      // 未启用复核：保持旧众数的精确选取路径（块内首个 maxFreq 排名）
+      topRank = start;
+      while (topRank < end && freq[topRank] !== maxFreq) topRank++;
+      topFreq = maxFreq;
+    }
 
-    answers[qi] = { value: sorted[chosenRank], count: maxFreq };
+    if (!bimodal) {
+      answers[qi] = { value: sorted[topRank], count: maxFreq };
+      continue;
+    }
+
+    // 其他值块的最优候选：blockMax 最高（并列取最左块）的块内最左命中 rank。
+    // 各块按"频次降序、rank 升序"比较，它与获胜块次席决出全局第二名。
+    let otherRank = -1;
+    let otherFreq = -1;
+    for (let b = 0; b < numBlocks; b++) {
+      if (b === chosenBlock) continue;
+      const bf = blockMax[b];
+      if (bf <= 0 || bf < otherFreq) continue;
+      const bs = b * blockSize;
+      const be = Math.min(bs + blockSize, m);
+      let br = bs;
+      while (br < be && freq[br] !== bf) br++;
+      if (br < be && (otherRank < 0 || bf > otherFreq || (bf === otherFreq && br < otherRank))) {
+        otherRank = br;
+        otherFreq = bf;
+      }
+    }
+
+    // 全局次席：块内次席与其他块首席按同一排序键裁决
+    if (otherRank >= 0 && (secondRank < 0 || otherFreq > secondFreq || (otherFreq === secondFreq && otherRank < secondRank))) {
+      secondRank = otherRank;
+      secondFreq = otherFreq;
+    }
+
+    const first: ModeResult = { value: sorted[topRank], count: topFreq };
+    answers[qi] = {
+      first,
+      second: secondRank >= 0 ? { value: sorted[secondRank], count: secondFreq } : null,
+    };
   }
-  return answers;
+  return answers as ModeResult[] | BimodalResult[];
 }
 
 /** 将升序数组就地去重，返回去重后长度。 */

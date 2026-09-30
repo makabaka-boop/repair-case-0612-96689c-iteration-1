@@ -96,6 +96,54 @@ code {
   margin-left: 10px;
 }
 
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle.disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.toggle input {
+  accent-color: var(--accent);
+  cursor: inherit;
+}
+
+.badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.status-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.export-btn {
+  margin-left: 6px;
+}
+
+.second-empty {
+  color: var(--muted);
+}
+
+.col-second {
+  color: #b9cbe4;
+}
+
 .json-input {
   width: 100%;
   min-height: 180px;

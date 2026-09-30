@@ -1,38 +1,5 @@
 import { expect, test } from '@playwright/test';
-
-/** 构造 20 万读数 + 20 万查询的对抗批次：大区间与单点交替，末区间为全数组。 */
-function buildAdversarialBatch(): { json: string; first: { left: number; right: number } } {
-  const n = 200_000;
-  const q = 200_000;
-
-  let seed = 20260916 >>> 0;
-  const rand = () => {
-    seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-
-  const values = new Array<number>(n);
-  for (let i = 0; i < n; i++) {
-    values[i] = (i % 1000 === 0) ? 424242 : Math.floor(rand() * 30000) - 15000;
-  }
-
-  const queries = new Array<{ left: number; right: number }>(q);
-  for (let i = 0; i < q - 1; i++) {
-    if ((i & 1) === 0) {
-      const l = Math.floor(rand() * 1000);
-      queries[i] = { left: l, right: n - 1 - Math.floor(rand() * 1000) };
-    } else {
-      const p = Math.floor(rand() * n);
-      queries[i] = { left: p, right: p };
-    }
-  }
-  // 全数组区间：哨兵值 424242 出现 200 次，是可核对的唯一末行答案
-  queries[q - 1] = { left: 0, right: n - 1 };
-
-  return { json: JSON.stringify({ values, queries }), first: queries[0] };
-}
+import { buildAdversarialBatch } from './helpers';
 
 test.describe('区间众数巡检 UI', () => {
   test.beforeEach(async ({ page }) => {
@@ -160,7 +127,7 @@ test.describe('区间众数巡检 UI', () => {
     await scroller.evaluate((el) => el.scrollTo({ top: 0 }));
     await expect(page.locator('.col-index', { hasText: '1' }).first()).toBeVisible();
     await expect(page.locator('.result-table tbody tr:not([aria-hidden="true"]) .col-range').first()).toContainText(
-      `[${batch.first.left}, ${batch.first.right}]`,
+      `[${batch.queries[0].left}, ${batch.queries[0].right}]`,
     );
   });
 });
